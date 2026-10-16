@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">5ber eSIM</string>
+    <string name="tagline">eSIM profile manager for your 5ber card</string>
+    <string name="button_check_sim">Check SIM</string>
+    <string name="sim_check_placeholder">SIM scanning is not implemented yet</string>
+</resources>
