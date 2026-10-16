@@ -3,4 +3,6 @@
     <color name="brand">#0F766E</color>
     <color name="brand_dark">#0B5750</color>
     <color name="ic_launcher_background">#0F766E</color>
+    <color name="row_bg">#0A0F766E</color>
+    <color name="row_stroke">#220F766E</color>
 </resources>

@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">5ber eSIM</string>
-    <string name="tagline">eSIM profile manager for your 5ber card</string>
-    <string name="button_check_sim">Check SIM</string>
-    <string name="sim_check_placeholder">SIM scanning is not implemented yet</string>
+    <string name="tagline">Card manager — USB reader mode</string>
+    <string name="reader_none">No USB reader detected.\nPlug in a CCID smart-card reader with the 5ber card inserted, then tap Connect.</string>
+    <string name="reader_found">Reader: %1$s</string>
+    <string name="btn_connect">Connect / Read card</string>
+    <string name="btn_demo">Demo mode</string>
+    <string name="profiles_header">Profiles</string>
+    <string name="no_profiles">No profiles found on the card.</string>
+    <string name="log_apdus">Log APDUs (debug)</string>
 </resources>
