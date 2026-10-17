@@ -1,11 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">5ber eSIM</string>
-    <string name="tagline">Card manager — phone slot (no reader needed) or USB reader</string>
-    <string name="reader_none">No USB reader detected.\nPlug in a CCID smart-card reader with the 5ber card inserted, then tap Connect.</string>
-    <string name="reader_found">Reader: %1$s</string>
-    <string name="btn_connect">Connect / Read card</string>
-    <string name="btn_demo">Demo mode</string>
+    <string name="tagline">Card manager — the card in your phone\'s SIM slot, via Shizuku</string>
     <string name="btn_slot">Read card in phone slot (Shizuku)</string>
     <string name="btn_add">Add eSIM profile (QR / activation code)</string>
     <string name="profiles_header">Profiles</string>

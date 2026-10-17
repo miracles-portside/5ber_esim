@@ -1,7 +1,7 @@
 package work.portside.esim.euicc
 
-import work.portside.esim.usb.CardException
-import work.portside.esim.usb.CardTransport
+import work.portside.esim.card.CardException
+import work.portside.esim.card.CardTransport
 import work.portside.esim.util.Hex
 import work.portside.esim.util.Logs
 import work.portside.esim.util.Tlv

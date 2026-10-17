@@ -1,16 +1,10 @@
 package work.portside.esim
 
 import android.Manifest
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Typeface
-import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbManager
-import android.os.Build
 import android.os.Bundle
 import android.telephony.SubscriptionInfo
 import android.telephony.SubscriptionManager
@@ -31,6 +25,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import rikka.shizuku.Shizuku
+import work.portside.esim.card.CardException
+import work.portside.esim.card.CardTransport
 import work.portside.esim.euicc.EuiccCard
 import work.portside.esim.euicc.ProfileInfo
 import work.portside.esim.lpa.ActivationCode
@@ -38,10 +34,6 @@ import work.portside.esim.lpa.LpaSession
 import work.portside.esim.lpa.Sgp22
 import work.portside.esim.slot.SlotTransport
 import work.portside.esim.ui.QrScanActivity
-import work.portside.esim.usb.CardException
-import work.portside.esim.usb.CardTransport
-import work.portside.esim.usb.CcidReader
-import work.portside.esim.usb.DemoCardTransport
 import work.portside.esim.util.Hex
 import work.portside.esim.util.Logs
 import java.util.concurrent.CountDownLatch
@@ -51,16 +43,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        private const val ACTION_USB_PERMISSION = "work.portside.esim.USB_PERMISSION"
         private const val SHIZUKU_PERMISSION_REQUEST = 4201
         private const val PHONE_STATE_REQUEST = 4202
         private const val REQ_SCAN = 4203
     }
 
-    private lateinit var usbManager: UsbManager
-    private lateinit var readerStatus: TextView
-    private lateinit var btnConnect: Button
-    private lateinit var btnDemo: Button
     private lateinit var btnSlot: Button
     private lateinit var btnAdd: Button
     private lateinit var progress: ProgressBar
@@ -76,13 +63,9 @@ class MainActivity : AppCompatActivity() {
     private var transport: CardTransport? = null
     private var card: EuiccCard? = null
     private var profiles: List<ProfileInfo> = emptyList()
-    private var lastUsbDevice: UsbDevice? = null
 
     @Volatile
     private var busy = false
-
-    @Volatile
-    private var demoMode = false
 
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode == SHIZUKU_PERMISSION_REQUEST) {
@@ -91,42 +74,6 @@ class MainActivity : AppCompatActivity() {
                 connectToSlot()
             } else {
                 toast("Shizuku permission denied")
-            }
-        }
-    }
-
-    private val permissionReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != ACTION_USB_PERMISSION) return
-            @Suppress("DEPRECATION")
-            val device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE) as? UsbDevice ?: return
-            if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                connectToDevice(device)
-            } else {
-                appendLog("USB permission denied for ${device.deviceName}")
-            }
-        }
-    }
-
-    private val attachReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            @Suppress("DEPRECATION")
-            val device = intent?.getParcelableExtra(UsbManager.EXTRA_DEVICE) as? UsbDevice ?: return
-            when (intent.action) {
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    if (CcidReader.isCcidDevice(device)) {
-                        appendLog("Reader attached: ${device.productName ?: device.deviceName}")
-                        requestPermissionIfNeeded(device)
-                    }
-                }
-
-                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    appendLog("Reader detached")
-                    lastUsbDevice = null
-                    executor.execute { closeCard() }
-                    clearCardUi()
-                    updateReaderStatus()
-                }
             }
         }
     }
@@ -147,11 +94,6 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-
-        readerStatus = findViewById(R.id.reader_status)
-        btnConnect = findViewById(R.id.btn_connect)
-        btnDemo = findViewById(R.id.btn_demo)
         btnSlot = findViewById(R.id.btn_slot)
         btnAdd = findViewById(R.id.btn_add)
         progress = findViewById(R.id.progress)
@@ -165,98 +107,20 @@ class MainActivity : AppCompatActivity() {
         Logs.sink = { message -> appendLog(message) }
         apduCheck.setOnCheckedChangeListener { _, checked -> Logs.apduLogging = checked }
 
-        btnConnect.setOnClickListener { onConnectClicked() }
-        btnDemo.setOnClickListener { startDemo() }
         btnSlot.setOnClickListener { onSlotClicked() }
         btnAdd.setOnClickListener { onAddClicked() }
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
 
-        ContextCompat.registerReceiver(
-            this,
-            permissionReceiver,
-            IntentFilter(ACTION_USB_PERMISSION),
-            ContextCompat.RECEIVER_NOT_EXPORTED,
-        )
-        ContextCompat.registerReceiver(
-            this,
-            attachReceiver,
-            IntentFilter().apply {
-                addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
-                addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
-            },
-            ContextCompat.RECEIVER_NOT_EXPORTED,
-        )
-
-        updateReaderStatus()
-        appendLog("Ready. Use the card in the phone's SIM slot (Shizuku), plug in a USB CCID reader, or use demo mode.")
+        updateActionButtons()
+        appendLog("Ready. The card is read from the phone's SIM slot through Shizuku.")
     }
 
     override fun onDestroy() {
         super.onDestroy()
         Logs.sink = null
         runCatching { Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener) }
-        try {
-            unregisterReceiver(permissionReceiver)
-            unregisterReceiver(attachReceiver)
-        } catch (_: Exception) {
-        }
         executor.execute { closeCard() }
         executor.shutdown()
-    }
-
-    // ---------------------------------------------------------------- actions
-
-    private fun onConnectClicked() {
-        val device = CcidReader.findReaders(usbManager).firstOrNull()
-        if (device == null) {
-            toast("No USB reader detected")
-            return
-        }
-        requestPermissionIfNeeded(device)
-    }
-
-    private fun requestPermissionIfNeeded(device: UsbDevice) {
-        if (usbManager.hasPermission(device)) {
-            connectToDevice(device)
-            return
-        }
-        val intent = Intent(ACTION_USB_PERMISSION).setPackage(packageName)
-        var flags = PendingIntent.FLAG_UPDATE_CURRENT
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) flags = flags or PendingIntent.FLAG_MUTABLE
-        val pending = PendingIntent.getBroadcast(this, 0, intent, flags)
-        appendLog("Requesting USB permission for ${device.deviceName}")
-        usbManager.requestPermission(device, pending)
-    }
-
-    private fun connectToDevice(device: UsbDevice) {
-        lastUsbDevice = device
-        runBackground { doConnectToDevice(device) }
-    }
-
-    /** Must run on the background executor. */
-    private fun doConnectToDevice(device: UsbDevice) {
-        closeCard()
-        demoMode = false
-        val reader = CcidReader.open(usbManager, device)
-        val euicc = EuiccCard(reader)
-        euicc.connect()
-        transport = reader
-        card = euicc
-        readCard()
-    }
-
-    private fun startDemo() {
-        runBackground {
-            closeCard()
-            demoMode = true
-            val demo = DemoCardTransport()
-            val euicc = EuiccCard(demo)
-            euicc.connect()
-            transport = demo
-            card = euicc
-            appendLog("DEMO mode — no real card is being touched")
-            readCard()
-        }
     }
 
     // ---------------------------------------------------------------- phone slot (Shizuku)
@@ -307,7 +171,6 @@ class MainActivity : AppCompatActivity() {
             throw CardException("No active SIM subscription — the card may still be re-initializing")
         }
         closeCard()
-        demoMode = false
         var foundTransport: CardTransport? = null
         var foundCard: EuiccCard? = null
         var lastError: String? = null
@@ -353,15 +216,6 @@ class MainActivity : AppCompatActivity() {
         runCatching { transport?.close() }
         card = null
         transport = null
-        demoMode = false
-    }
-
-    private fun clearCardUi() {
-        cardInfo.visibility = View.GONE
-        profilesHeader.visibility = View.GONE
-        emptyHint.visibility = View.GONE
-        profilesContainer.removeAllViews()
-        profiles = emptyList()
     }
 
     private fun refreshProfiles() {
@@ -483,8 +337,7 @@ class MainActivity : AppCompatActivity() {
         var last: Exception? = null
         repeat(6) {
             try {
-                val device = lastUsbDevice
-                if (device != null) doConnectToDevice(device) else doConnectToSlot()
+                doConnectToSlot()
                 return
             } catch (e: Exception) {
                 last = e
@@ -574,7 +427,7 @@ class MainActivity : AppCompatActivity() {
     private fun runInstall(code: ActivationCode, confirmationCode: String?) {
         val euicc = card
         if (euicc == null) {
-            toast("Read the card first (phone slot or USB reader), then try again")
+            toast("Read the card first (phone slot), then try again")
             return
         }
         runBackground {
@@ -647,8 +500,6 @@ class MainActivity : AppCompatActivity() {
         busy = true
         ui {
             progress.visibility = View.VISIBLE
-            btnConnect.isEnabled = false
-            btnDemo.isEnabled = false
             btnSlot.isEnabled = false
             btnAdd.isEnabled = false
         }
@@ -666,32 +517,21 @@ class MainActivity : AppCompatActivity() {
                 ui {
                     busy = false
                     progress.visibility = View.GONE
-                    updateReaderStatus()
+                    updateActionButtons()
                 }
             }
         }
     }
 
-    private fun updateReaderStatus() {
-        val readers = CcidReader.findReaders(usbManager)
-        readerStatus.text = if (readers.isEmpty()) {
-            getString(R.string.reader_none)
-        } else {
-            val device = readers.first()
-            val label = device.productName?.takeIf { it.isNotBlank() } ?: device.deviceName
-            getString(R.string.reader_found, label)
-        }
-        btnConnect.isEnabled = readers.isNotEmpty() && !busy
-        btnDemo.isEnabled = !busy
+    private fun updateActionButtons() {
         btnSlot.isEnabled = !busy
         btnAdd.isEnabled = !busy
     }
 
     private fun showCardInfo(eid: String?) {
         cardInfo.visibility = View.VISIBLE
-        val prefix = if (demoMode) "DEMO — simulated card\n" else ""
         val eidText = if (eid != null) Hex.grouped(eid) else "not readable on this card"
-        cardInfo.text = prefix + "Transport: ${transport?.name ?: "?"}\nEID: $eidText"
+        cardInfo.text = "Transport: ${transport?.name ?: "?"}\nEID: $eidText"
     }
 
     private fun showProfiles(list: List<ProfileInfo>) {

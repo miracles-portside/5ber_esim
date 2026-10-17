@@ -3,8 +3,8 @@ package work.portside.esim.slot
 import android.content.Context
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuRemoteProcess
-import work.portside.esim.usb.CardException
-import work.portside.esim.usb.CardTransport
+import work.portside.esim.card.CardException
+import work.portside.esim.card.CardTransport
 import work.portside.esim.util.Hex
 import work.portside.esim.util.Logs
 import java.io.BufferedReader
@@ -14,7 +14,7 @@ import java.io.OutputStreamWriter
 import java.util.concurrent.TimeUnit
 
 /**
- * Talks to the card **in the phone's SIM slot**, no USB reader and no root: the helper
+ * Talks to the card **in the phone's SIM slot**, no root and no PC: the helper
  * (`work.portside.esim.shell.SlotHelper`) is started through Shizuku, which runs it with the
  * `shell` identity, and the helper opens the logical channel to the card for us.
  *

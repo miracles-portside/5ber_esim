@@ -1,6 +1,6 @@
 package work.portside.esim.lpa
 
-import work.portside.esim.usb.CardException
+import work.portside.esim.card.CardException
 import work.portside.esim.util.B64
 import work.portside.esim.util.Ber
 import work.portside.esim.util.Hex

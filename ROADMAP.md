@@ -1,66 +1,43 @@
 # Roadmap
 
-## Phase 1 — local profile management over USB reader ✅
+## Phase 1 — card management from the phone slot ✅
 
-- USB CCID T=0 transport (`usb/CcidReader.kt`)
-- eUICC session + ES10x framing (`euicc/EuiccCard.kt`)
-- EID, profile list, enable/disable/delete, nickname
-- Demo mode fake card for hardware-less testing
+- Transport: Shizuku → `app_process` helper that opens the card's management applet (vendor
+  AID `A0000005591010FFFFFFFF8900050500`) on the live modem, with a live-binder logical
+  channel so the framework's "client died" cleanup can't kill it
+- ES10x framing: STORE DATA, 61XX GET RESPONSE continuation, 120-byte segmentation
+- ES10c: EID, profile list, enable / disable / delete / nickname — verified on the card
+- Safety rails + on-screen APDU log
 
-**Blocked on hardware**: a USB CCID reader + the 5ber card to verify against the real chip.
+## Phase 2 — profile download (SGP.22) ✅
 
-## Phase 2 — add a new profile (download from SM-DP+)
+Verified end-to-end: Billion Connect installed on the card, notification delivered, profile
+enabled and serving.
 
-This is the big one: full LPA download per GSMA SGP.22. Flow with an activation code
-(`LPA:1$<smdp+>$<matchingId>[$<oid>]` or a QR):
+- QR / activation-code parsing; ES10b GetEUICCInfo1 + challenge → ES9+ initiateAuthentication
+  → ES10b AuthenticateServer → ES9+ authenticateClient (preview + confirmation code) →
+  ES10b PrepareDownload → ES9+ getBoundProfilePackage → segmented BF36 LoadBoundProfilePackage
+  (42 segments live) → ProfileInstallationResult → ES9+ handleNotification
+- Fixes the live run required: INTERNET permission; GSMA RSP2 root bundled as trust anchor;
+  auto-reconnect after the SIM refresh (`6881`); empty-body notification replies
 
-1. **Parse activation code** (QR or typed): SM-DP+ FQDN + matching ID (+ optional OID).
-2. **eUICC prep**
-   - ES10b `GetEUICCInfo1` (BF20) — forwarded to the server.
-   - ES10b `GetEUICCChallenge` (BF2E).
-   - ES10c `GetEID` (BF3E) — already implemented.
-3. **ES9+ `AuthenticateServer`** — HTTPS POST (JSON, base64 ASN.1 body) to
-   `https://<smdp>:443/gsma/rsp2/es9plus/authenticateServer`.
-   - Request: euiccChallenge + euiccInfo1 + matchingId (ASN.1 DER, base64).
-   - Response: serverSigned1, serverSignature1, euiccCiPKIdToBeUsed, serverCertificate.
-4. **ES10b `AuthenticateServer`** (BF38) — pass server data to the card; the *card* verifies
-   the GSMA CI chain and returns euiccSigned1 + euiccSignature1.
-5. **ES9+ `AuthenticateServer` (2nd call)** — send euiccSigned1/euiccSignature1 + LPA
-   certificate chain + lpaSignature1 (LPA signs with its key; certs needed — check what
-   lpac ships; GSMA CI roots are in SGP.22 spec).
-   - Response: transactionId + profileMetadata for the confirmation step.
-6. **ES9+ `GetBoundProfilePackage`** — returns the BoundProfilePackage (BF37) as a
-   base64 string.
-7. **ES10b `LoadBoundProfilePackage`** (BF36) — feed the package to the card in segments,
-   relaying the card's responses per the standard until ProfileInstallationResult (BF37)
-   comes back; handle rollback/notification cases.
-8. **ES9+ `HandleNotification`** — report ProfileInstallationResult to the server.
-9. **Enable** the new profile (existing ES10c code) + refresh handling.
+## Phase 3 — the modem write window (active)
 
-Needed pieces:
-- ASN.1 DER encode/decode for the SGP.22 structures (extend `util/Tlv.kt` into a small
-  typed layer for the specific structures).
-- HTTPS + JSON wrapper for ES9+ (OkHttp or plain HttpsURLConnection; no cert pinning
-  needed beyond system trust + GSMA CI verification done by the card).
-- ECDSA P-256 sign/verify via JCA (Android supports secp256r1).
-- Certificate material: GSMA CI root certs + an LPA certificate/key pair that SM-DP+
-  servers accept (research what lpac uses — `euicc/es9p.c`, and their cert handling).
-- Testing needs a real activation code (single-use — get one when close).
+The modem intermittently refuses writes (`6F00`) to the card while reads stay fine; toggling
+the built-in eSIM resets the stack and writes open again. Open questions:
 
-## Phase 3 — polish
+- [ ] **Measure the window**: after the toggle, how many seconds do writes stay open?
+      Tool: `profilemgr.py probe` + `tools/iccbr` (the Termux/adb path)
+- [ ] **Find the closure trigger**: time, a later APDU, or the framework re-arming a filter?
+- [ ] **Recover without the manual toggle**: e.g. time retries to the window, or re-create
+      the stack reset from the shell side (Shizuku)
+- [ ] Fold the result into the app (better hint / automatic retry)
+
+## Phase 4 — polish
 
 - Profile icons (tag 0x94) and richer EUICC info display
-- Notifications: list / send / delete (ES10b) — useful after failed downloads
+- Notifications: list / send / delete (ES10b) — to replay notifications left queued by
+  failed downloads
 - SM-DS discovery (optional; EasyEUICC doesn't support it either)
-- Telephony/OMAPI transport is *not* planned: blocked by ARA-M for this card on
-  unrooted phones, readers are the supported path.
-
-## Testing checklist (when the reader arrives)
-
-- [ ] Reader enumerated, permission flow, ATR read
-- [ ] MANAGE CHANNEL + ISD-R select on the real 5ber card
-- [ ] EID read (compare with the EID 5ber showed, if recorded)
-- [ ] Profile list matches reality; state flags correct
-- [ ] Rename round-trip
-- [ ] Enable/disable/delete behaviour + policy errors mapped correctly
-- [ ] Re-insert card into phone; check it still registers
+- Telephony/OMAPI transport is *not* planned: blocked by ARA-M for this card on unrooted
+  phones; the Shizuku shell path is the supported route.

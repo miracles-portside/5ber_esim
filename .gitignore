@@ -23,3 +23,9 @@ keystore/
 /captures
 .externalNativeBuild
 .cxx
+
+# iccbr helper build output
+tools/iccbr/build/
+
+# Python
+__pycache__/

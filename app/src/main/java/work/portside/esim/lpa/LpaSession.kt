@@ -1,7 +1,7 @@
 package work.portside.esim.lpa
 
 import work.portside.esim.euicc.EuiccCard
-import work.portside.esim.usb.CardException
+import work.portside.esim.card.CardException
 import work.portside.esim.util.B64
 
 /**

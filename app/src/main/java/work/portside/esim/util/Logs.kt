@@ -4,7 +4,7 @@ import android.util.Log
 
 /**
  * Tiny global log bus: everything interesting also shows up in the app's log pane,
- * which makes on-device debugging of card/reader issues much easier.
+ * which makes on-device debugging of card issues much easier.
  */
 object Logs {
     private const val TAG = "5ber"

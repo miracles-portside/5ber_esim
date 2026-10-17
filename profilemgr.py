@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Manage eSIM profiles on the removable eUICC card (5ber/ifree lineage) through the phone.
-No root, no app, no vendor servers: APDUs are injected via a helper (IccBr) running as
-shell through app_process64 with a live-binder logical channel to the card's management applet.
+No root, no app, no vendor servers: APDUs are injected via the IccBr helper (source and
+build script in tools/iccbr/), run as shell through app_process64 with a live-binder
+logical channel to the card's management applet.
 
 Usage:
   python3 profilemgr.py list
@@ -9,14 +10,17 @@ Usage:
   python3 profilemgr.py disable <iccid>
   python3 profilemgr.py delete  <iccid>
   python3 profilemgr.py nickname <iccid> <new name>
+  python3 profilemgr.py probe [seconds] [interval]   # map the modem's write window
 
 Env:
   ADB_DEVICE  adb serial (default: first 'device' in `adb devices`)
-  CARD_SUB    subscription id of the card (default 22)
+  CARD_SUB    subscription id of the card (default 22; the card re-enumerates after every
+              SIM refresh, so this needs updating when the subscription id changes)
 """
 import os
 import subprocess
 import sys
+import time
 
 CARD_SUB = int(os.environ.get("CARD_SUB", "22"))
 SLOT, PORT = 0, 0
@@ -157,6 +161,115 @@ def send_profile_op(tag, iccid_hex, extra=""):
     return 1
 
 
+WRITE_CANARY = "80 E2 91 00 14 BF29110000000000000000000000000000000000"
+# A deliberately invalid ES10c write (padded BF29): harmless - it cannot change a profile -
+# but it exercises the exact APDU path the modem write-blocks with 6F00.
+
+
+def open_session():
+    cmd = ["adb", "-s", adb_serial(), "shell",
+           f"{HELPER} {CARD_SUB} {SLOT} {PORT} {CARD_AID} com.android.shell"]
+    return subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+
+def cmd_probe(seconds=120.0, interval=1.0):
+    """Timeline of write attempts on one live session.
+
+    Toggle the built-in eSIM (Settings -> SIM cards) while this runs: the modem's write
+    block (6F00) should lift for a while - this prints when the window opens and closes.
+    """
+    t0 = time.monotonic()
+
+    def elapsed():
+        return time.monotonic() - t0
+
+    def log(msg):
+        print(f"[t+{elapsed():6.1f}s] {msg}")
+
+    print(f"canary: {WRITE_CANARY}")
+    print(f"probing every {interval:g}s, up to {seconds:g}s - toggle the built-in eSIM to open the window")
+    timeline = []  # (t, kind, detail)
+    proc = None
+    try:
+        while elapsed() < seconds:
+            if proc is None or proc.poll() is not None:
+                if proc is not None:
+                    log("-- session died --")
+                    timeline.append((elapsed(), "dead", "session died"))
+                proc = open_session()
+                channel = False
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line:
+                        log(line)
+                    if "CHANNEL=" in line:
+                        channel = not line.endswith("-1")
+                        break
+                    if "[!]" in line:
+                        break
+                if not channel:
+                    timeline.append((elapsed(), "dead", "no channel"))
+                    proc = None
+                    time.sleep(interval)
+                    continue
+
+            proc.stdin.write(WRITE_CANARY + "\n")
+            proc.stdin.flush()
+            response = None
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line.startswith(WRITE_CANARY[:11]):
+                    response = line.split("=>", 1)[1].strip() if "=>" in line else line
+                    break
+                if line:
+                    log(line)
+            if response is None or response == "null":
+                timeline.append((elapsed(), "dead", response or "no response"))
+                proc = None
+                continue
+
+            low = response.lower()
+            if "6f00" in low:
+                kind, what = "blocked", "BLOCKED (6F00)"
+            elif response.startswith("ERR"):
+                kind, what = "dead", "error"
+            else:
+                kind, what = "ok", "open (write path)"
+            timeline.append((elapsed(), kind, response))
+            log(f"write -> {response}   [{what}]")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print()
+        log("interrupted")
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.stdin.write("quit\n")
+                proc.stdin.flush()
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+
+    print("-- summary --")
+    start = None
+    for t, kind, _ in timeline:
+        if kind == "ok" and start is None:
+            start = t
+        elif kind != "ok" and start is not None:
+            print(f"  write path open  t+{start:6.1f}s .. t+{t:6.1f}s  (~{t - start:.0f}s)")
+            start = None
+    if start is not None:
+        print(f"  write path open  t+{start:6.1f}s .. t+{elapsed():6.1f}s  (~{elapsed() - start:.0f}s)")
+    if not any(k == "ok" for _, k, _ in timeline):
+        print("  no writable window observed")
+    ok = sum(1 for _, k, _ in timeline if k == "ok")
+    blocked = sum(1 for _, k, _ in timeline if k == "blocked")
+    dead = sum(1 for _, k, _ in timeline if k == "dead")
+    print(f"  {len(timeline)} probes: {ok} open, {blocked} blocked, {dead} no-session")
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -164,6 +277,10 @@ def main():
     c = sys.argv[1]
     if c == "list":
         return cmd_list()
+    if c == "probe":
+        seconds = float(sys.argv[2]) if len(sys.argv) > 2 else 120.0
+        interval = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
+        return cmd_probe(seconds, interval)
     if c in ("enable", "disable", "delete") and len(sys.argv) == 3:
         tag = {"enable": "BF31", "disable": "BF32", "delete": "BF33"}[c]
         return send_profile_op(tag, encode_iccid(sys.argv[2]))

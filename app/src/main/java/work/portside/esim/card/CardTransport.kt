@@ -1,6 +1,6 @@
-package work.portside.esim.usb
+package work.portside.esim.card
 
-/** A smart card we can talk to. Implemented by the USB CCID reader, faked by demo mode. */
+/** A smart card we can talk to. Implemented by the phone-slot (Shizuku) transport. */
 interface CardTransport {
     val name: String
 
