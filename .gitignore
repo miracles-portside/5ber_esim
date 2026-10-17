@@ -3,6 +3,10 @@
 build/
 local.properties
 
+# Release signing — never commit these
+keystore.properties
+keystore/
+
 # IDE
 .idea/
 *.iml

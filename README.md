@@ -57,12 +57,17 @@ real activation code):
 ## Build
 
 ```sh
-./gradlew assembleDebug
+./gradlew assembleDebug      # debug APK
+./gradlew assembleRelease    # signed release APK
 ```
 
-APK: `app/build/outputs/apk/debug/app-debug.apk`
+- Debug APK: `app/build/outputs/apk/debug/app-debug.apk`
+- Release APK: `app/build/outputs/apk/release/app-release.apk` — signed with the project's
+  release keystore. The credentials live in `keystore.properties` and `keystore/*.jks`,
+  both git-ignored: **back them up**, or you won't be able to update-install over an
+  existing release build.
 
-For the current build a copy is also at `/sdcard/Download/5ber-esim-0.2.0.apk`.
+Release copies land in `/sdcard/Download/` (e.g. `5ber-esim-0.2.1-release.apk`).
 
 ## Use
 
