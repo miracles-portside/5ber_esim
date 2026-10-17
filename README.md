@@ -65,8 +65,9 @@ end-to-end on the phone slot (Billion Connect, `rsp.billionconnect.com`):
 ## Build
 
 ```sh
-./gradlew assembleDebug      # debug APK
-./gradlew assembleRelease    # signed release APK
+./build-release.sh           # release build + copy to /sdcard/Download (the usual flow)
+./gradlew assembleRelease    # signed release APK only
+./gradlew assembleDebug      # debug APK (dev only)
 ```
 
 - Debug APK: `app/build/outputs/apk/debug/app-debug.apk`
