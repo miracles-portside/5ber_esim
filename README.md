@@ -17,6 +17,10 @@ free, no root, startable on-device through wireless debugging on Android 11+ —
 shell context: the app launches a tiny helper process through Shizuku which opens the card's
 management applet on the live modem and pipes APDUs between it and the app.
 
+That identity cannot be re-created: an APK only ever ships the *public* certificate — the
+private signing key never leaves the developer's build system — so no re-signed build can
+ever match the card's access rules. Shizuku (or the reader) is the only way in.
+
 A USB CCID reader talks ISO 7816 to the chip directly, bypassing ARA-M completely — no
 Shizuku required. This is the standard recovery route for orphaned cards.
 
@@ -36,14 +40,18 @@ Android 16, with a 5ber/ifree card):
 - On-screen log (with optional full APDU hex) for on-device debugging
 - **Demo mode** to exercise the whole UI + protocol code without any hardware
 
-**Phase 2 — profile download (SGP.22)** — implemented, not yet tested end-to-end (needs a
-real activation code):
+**Phase 2 — profile download (SGP.22)** — working; first real eSIM install verified
+end-to-end on the phone slot (Billion Connect, `rsp.billionconnect.com`):
 
 - QR scanner built in (CameraX + ZXing core, no Play Services) + manual code entry
 - Full download flow: ES10b GetEUICCInfo1 + challenge → ES9+ initiateAuthentication →
   ES10b AuthenticateServer → ES9+ authenticateClient (profile preview + optional
   confirmation code) → ES10b PrepareDownload → ES9+ getBoundProfilePackage → segmented
-  BF36 LoadBoundProfilePackage → result notification reported back to the SM-DP+
+  BF36 LoadBoundProfilePackage (42 segments in the live run) → result notification to the
+  SM-DP+ → offer to enable the new profile
+- Issues the live test surfaced, both fixed: the app was missing the INTERNET permission,
+  and SM-DP+ TLS certificates chain to the GSMA RSP2 PKI that Android does not trust by
+  default (see *SM-DP+ notes* below)
 
 ## Hardware you need
 
@@ -67,7 +75,8 @@ real activation code):
   both git-ignored: **back them up**, or you won't be able to update-install over an
   existing release build.
 
-Release copies land in `/sdcard/Download/` (e.g. `5ber-esim-0.2.2-release.apk`).
+Release copies land in `/sdcard/Download/` (e.g. `5ber-esim-0.2.3-release.apk`; the current
+release is **0.2.3**).
 
 ## Use
 
@@ -92,20 +101,38 @@ Release copies land in `/sdcard/Download/` (e.g. `5ber-esim-0.2.2-release.apk`).
    provider sent one.
 3. The app downloads, installs and reports the result, then offers to enable the new profile.
 
-After switching the active profile, the modem may need a SIM-stack refresh (toggle the card
-in Settings → SIM cards) — the app tells you when.
+After switching the active profile the app reconnects by itself: the card re-initializes
+for a moment (the modem re-reads it as a fresh subscription). If card writes start getting
+refused (`6F00`), toggle the built-in eSIM in Settings → SIM cards and retry — the app
+hints this in the log.
 
 *Demo mode* runs the entire flow against a fake card, no reader needed.
 
 ## Card quirks worth knowing
 
+- Switching the active profile triggers a SIM refresh: the old logical channel dies with
+  `6881` ("logical channel not supported") and the card re-enumerates as a new subscription
+  (even the `subId` changes). The app detects this and reconnects automatically.
 - The modem occasionally write-blocks this card (`6F00` a few ms into a write). Toggling the
   built-in eSIM off/on in Settings → SIM cards resets the card's write protection; the app
   hints this in the log.
 - GetEID needs the `5C` tag selector form (`BF3E 03 5C 01 5A`) on this card; the bare form is
   refused.
-- Notifications queued on the card (e.g. never-reported install events) are reported to the
-  SM-DP+ the next time the app runs an operation that touches them.
+
+## SM-DP+ (server) notes
+
+- **TLS**: SM-DP+ endpoints are commonly secured with GSMA CI (SGP.22) certificates — e.g.
+  `rsp.billionconnect.com` chains to `GSM Association - RSP2 Root CI1`, which is *not* in
+  Android's public trust store. The app bundles that root (`res/raw/gsma_rsp2_root_ci1.pem`)
+  as an extra trust anchor via `network_security_config.xml`, keeping the system store for
+  providers that use public CAs (Android's own LPA bundles the GSMA roots too).
+  For reference, lpac skips TLS verification entirely — the eUICC authenticates the server
+  end-to-end by signature (`serverSigned1` is verified by the card); we do both.
+- `handleNotification` may be answered with an empty 2xx body — that means success. If
+  reporting fails, the notification stays queued on the card; the provider's portal may show
+  the profile as "not installed" until it is delivered.
+- The profile preview shown before installation comes from `profileMetadata`; some servers
+  omit it, in which case the app just asks for a plain confirm.
 
 ## Stack
 
@@ -127,7 +154,8 @@ app/src/main/java/work/portside/esim/
   slot/    SlotTransport — client side of SlotHelper
   ui/      QrScanActivity — CameraX/ZXing QR scanner
   MainActivity.kt — UI
-app/src/main/res/  layout, theme, launcher icon, USB attach filter
+app/src/main/res/  layout, theme, launcher icon, USB attach filter,
+                   network_security_config.xml + bundled GSMA CI root (res/raw)
 profilemgr.py — adb-driven CLI for the same card operations (dev aid)
 ```
 
