@@ -27,14 +27,24 @@ data class ProfileInfo(
 }
 
 /**
- * Talks to an eUICC (the 5ber card) over the ISD-R using the SGP.22 ES10c command set.
- * All commands are BER-TLV payloads wrapped in STORE DATA APDUs on a logical channel,
- * exactly as the standard requires.
+ * Talks to an eUICC (the 5ber card) through its management applet using the SGP.22 ES10c
+ * command set. All commands are BER-TLV payloads wrapped in STORE DATA APDUs on a logical
+ * channel, exactly as the standard requires.
+ *
+ * @param refreshOnSwitch request a REFRESH from the card after enable/disable. Needed when
+ *        the card is live in the phone (so the modem re-reads it), pointless otherwise.
  */
-class EuiccCard(private val transport: CardTransport) {
+class EuiccCard(private val transport: CardTransport, private val refreshOnSwitch: Boolean = false) {
 
     companion object {
-        private val ISD_R_AID = Hex.decode("A0000005591010FFFFFFFF8900000100")
+        /**
+         * Management-applet AIDs to try, in order. Real 5ber/ifree-lineage cards do **not**
+         * carry the standard ISD-R AID — theirs is the vendor one (second entry).
+         */
+        private val AID_CANDIDATES = listOf(
+            Hex.decode("A0000005591010FFFFFFFF8900050500"), // 5ber / ifree vendor management applet
+            Hex.decode("A0000005591010FFFFFFFF8900000100"), // standard ISD-R (other cards)
+        )
 
         /** Max DER bytes per STORE DATA APDU; matches common LPA behaviour. */
         private const val ES10X_MSS = 120
@@ -51,8 +61,14 @@ class EuiccCard(private val transport: CardTransport) {
     fun connect() {
         if (connected) return
         atr = transport.powerOn()
+        if (transport.handlesSession) {
+            // The transport (phone slot) already opened the channel and selected the applet.
+            connected = true
+            Logs.i("Card: connected via ${transport.name}")
+            return
+        }
         channel = tryOpenLogicalChannel()
-        selectIsdr()
+        selectManager()
         connected = true
         Logs.i("Card: connected on logical channel $channel")
     }
@@ -65,12 +81,13 @@ class EuiccCard(private val transport: CardTransport) {
         Logs.i("Card: disconnected")
     }
 
-    /** EID as 32 hex digits. */
+    /** EID as 32 hex digits. Not every card exposes it — callers should tolerate failure. */
     fun getEid(): String {
         val response = es10x(Tlv.encode(0xBF3E, Tlv.encode(0x5C, byteArrayOf(0x5A))))
         val root = Tlv.parse(response).firstOrNull { it.tag == 0xBF3E }
             ?: throw CardException("Card did not return an EID")
-        return root.find(0x5A)?.let { Hex.bcdDigits(it.value) }
+        // The EID travels as plain hex digits, not as swapped BCD like the ICCID.
+        return root.find(0x5A)?.let { Hex.encode(it.value) }
             ?: throw CardException("Card did not return an EID")
     }
 
@@ -101,6 +118,9 @@ class EuiccCard(private val transport: CardTransport) {
 
     fun deleteProfile(iccid: String) = profileOperation(0xBF33, iccid)
 
+    /** Sends one ES10b request (same STORE DATA framing as ES10c) and returns the raw response. */
+    fun es10b(request: ByteArray): ByteArray = es10x(request)
+
     fun setNickname(iccid: String, nickname: String) {
         val request = Tlv.encode(
             0xBF29,
@@ -116,8 +136,10 @@ class EuiccCard(private val transport: CardTransport) {
             // DeleteProfile: plain choice, no refresh flag
             identifier
         } else {
-            // Enable/DisableProfile: choice + refreshFlag (FALSE — the card is out of the phone)
-            Tlv.encode(0xA0, identifier + Tlv.encode(0x81, byteArrayOf(0x00)))
+            // Enable/DisableProfile: choice + refreshFlag. Live in the phone we ask the card
+            // to send a REFRESH, so the modem re-reads it and the switch takes effect at once.
+            val flag = if (refreshOnSwitch) 0xFF.toByte() else 0x00
+            Tlv.encode(0xA0, identifier + Tlv.encode(0x81, byteArrayOf(flag)))
         }
         checkResult(es10x(Tlv.encode(tag, body)), tag)
     }
@@ -133,6 +155,9 @@ class EuiccCard(private val transport: CardTransport) {
         1 -> "the profile was not found on the card (check the ICCID)"
         2 -> "the card says the profile is in the wrong state for this operation"
         3 -> "the operation is blocked by the card's policy rules (ppr)"
+        4 -> "the card is busy with a re-enable; retry in a moment"
+        5 -> "the card is busy with another command; retry in a moment"
+        127 -> "the card did not understand the request"
         else -> "the card returned error code $code"
     }
 
@@ -151,12 +176,16 @@ class EuiccCard(private val transport: CardTransport) {
         }
     }
 
-    private fun selectIsdr() {
-        val response = transport.transmit(buildApdu(channel and 0x0F, 0xA4, 0x04, 0x00, ISD_R_AID, null))
-        val sw = sw1(response)
-        if (sw != 0x90 && sw != 0x61) {
-            throw CardException("Could not select the eUICC (ISD-R). Is a card in the reader? (SW ${swHex(response)})")
+    private fun selectManager() {
+        var lastSw = "??"
+        for (aid in AID_CANDIDATES) {
+            val response = transport.transmit(buildApdu(channel and 0x0F, 0xA4, 0x04, 0x00, aid, null))
+            val sw = sw1(response)
+            if (sw == 0x90 || sw == 0x61) return
+            lastSw = swHex(response)
+            Logs.i("Card: select ${Hex.encode(aid)} failed (SW $lastSw)")
         }
+        throw CardException("Could not select the eUICC management applet (SW $lastSw)")
     }
 
     /** Sends a DER request through ES10x STORE DATA, chunked per the standard, collecting all data. */
@@ -196,6 +225,7 @@ class EuiccCard(private val transport: CardTransport) {
             break
         }
         if ((sw1(response) and 0xF0) != 0x90) {
+            // 0x91 = success with a pending proactive command (the modem handles FETCH/REFRESH).
             throw CardException("Card error: SW ${swHex(response)}")
         }
         return out.toByteArray()

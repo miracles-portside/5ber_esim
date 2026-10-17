@@ -1,15 +1,18 @@
 package work.portside.esim
 
+import android.Manifest
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
+import android.telephony.SubscriptionManager
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -20,28 +23,45 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import rikka.shizuku.Shizuku
 import work.portside.esim.euicc.EuiccCard
 import work.portside.esim.euicc.ProfileInfo
+import work.portside.esim.lpa.ActivationCode
+import work.portside.esim.lpa.LpaSession
+import work.portside.esim.lpa.Sgp22
+import work.portside.esim.slot.SlotTransport
+import work.portside.esim.ui.QrScanActivity
+import work.portside.esim.usb.CardException
 import work.portside.esim.usb.CardTransport
 import work.portside.esim.usb.CcidReader
 import work.portside.esim.usb.DemoCardTransport
 import work.portside.esim.util.Hex
 import work.portside.esim.util.Logs
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val ACTION_USB_PERMISSION = "work.portside.esim.USB_PERMISSION"
+        private const val SHIZUKU_PERMISSION_REQUEST = 4201
+        private const val PHONE_STATE_REQUEST = 4202
+        private const val REQ_SCAN = 4203
     }
 
     private lateinit var usbManager: UsbManager
     private lateinit var readerStatus: TextView
     private lateinit var btnConnect: Button
     private lateinit var btnDemo: Button
+    private lateinit var btnSlot: Button
+    private lateinit var btnAdd: Button
     private lateinit var progress: ProgressBar
     private lateinit var cardInfo: TextView
     private lateinit var profilesHeader: TextView
@@ -61,6 +81,17 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile
     private var demoMode = false
+
+    private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+        if (requestCode == SHIZUKU_PERMISSION_REQUEST) {
+            if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                appendLog("Shizuku permission granted")
+                connectToSlot()
+            } else {
+                toast("Shizuku permission denied")
+            }
+        }
+    }
 
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -99,13 +130,27 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContentView(R.layout.activity_main)
+
+        // Android 15+ draws apps edge-to-edge; keep the content clear of the status bar
+        // and the navigation buttons ourselves.
+        val root = findViewById<View>(R.id.root)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
 
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
 
         readerStatus = findViewById(R.id.reader_status)
         btnConnect = findViewById(R.id.btn_connect)
         btnDemo = findViewById(R.id.btn_demo)
+        btnSlot = findViewById(R.id.btn_slot)
+        btnAdd = findViewById(R.id.btn_add)
         progress = findViewById(R.id.progress)
         cardInfo = findViewById(R.id.card_info)
         profilesHeader = findViewById(R.id.profiles_header)
@@ -119,6 +164,9 @@ class MainActivity : AppCompatActivity() {
 
         btnConnect.setOnClickListener { onConnectClicked() }
         btnDemo.setOnClickListener { startDemo() }
+        btnSlot.setOnClickListener { onSlotClicked() }
+        btnAdd.setOnClickListener { onAddClicked() }
+        Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
 
         ContextCompat.registerReceiver(
             this,
@@ -137,12 +185,13 @@ class MainActivity : AppCompatActivity() {
         )
 
         updateReaderStatus()
-        appendLog("Ready. Plug in a USB CCID reader with the card inserted, or use demo mode.")
+        appendLog("Ready. Use the card in the phone's SIM slot (Shizuku), plug in a USB CCID reader, or use demo mode.")
     }
 
     override fun onDestroy() {
         super.onDestroy()
         Logs.sink = null
+        runCatching { Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener) }
         try {
             unregisterReceiver(permissionReceiver)
             unregisterReceiver(attachReceiver)
@@ -203,10 +252,73 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---------------------------------------------------------------- phone slot (Shizuku)
+
+    private fun onSlotClicked() {
+        if (busy) return
+        if (!Shizuku.pingBinder()) {
+            toast("Shizuku is not running")
+            appendLog("Shizuku is not running. Open the Shizuku app and start it, or run via ADB:")
+            appendLog("  sh /storage/emulated/0/Android/data/moe.shizuku.privileged.api/start.sh")
+            return
+        }
+        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+            appendLog("Requesting Shizuku permission…")
+            Shizuku.requestPermission(SHIZUKU_PERMISSION_REQUEST)
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            appendLog("Requesting phone-state permission…")
+            requestPermissions(arrayOf(Manifest.permission.READ_PHONE_STATE), PHONE_STATE_REQUEST)
+            return
+        }
+        connectToSlot()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PHONE_STATE_REQUEST) connectToSlot()
+    }
+
+    private fun connectToSlot() {
+        val sm = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as? SubscriptionManager
+        val subs = runCatching { sm?.activeSubscriptionInfoList }.getOrNull().orEmpty()
+        if (subs.isEmpty()) {
+            toast("No active SIM subscriptions found — is the card inserted and enabled in Settings?")
+            return
+        }
+        runBackground {
+            closeCard()
+            demoMode = false
+            var foundTransport: CardTransport? = null
+            var foundCard: EuiccCard? = null
+            var lastError: String? = null
+            for (info in subs) {
+                try {
+                    val slotTransport = SlotTransport(applicationContext, info.subscriptionId, info.simSlotIndex)
+                    val slotCard = EuiccCard(slotTransport, refreshOnSwitch = true)
+                    slotCard.connect()
+                    foundTransport = slotTransport
+                    foundCard = slotCard
+                    break
+                } catch (e: Exception) {
+                    lastError = e.message
+                    Logs.i("slot: subId ${info.subscriptionId} → ${e.message}")
+                }
+            }
+            val t = foundTransport
+                ?: throw CardException("Card not found in any SIM slot" + (lastError?.let { " ($it)" } ?: ""))
+            val c = foundCard ?: throw CardException("Card not reachable")
+            transport = t
+            card = c
+            readCard()
+        }
+    }
+
     /** Must be called on the background executor. Updates the UI when done. */
     private fun readCard() {
         val euicc = card ?: throw IllegalStateException("No card connected")
-        val eid = euicc.getEid()
+        val eid = runCatching { euicc.getEid() }.getOrNull()
         val list = euicc.getProfiles()
         ui {
             showCardInfo(eid)
@@ -251,7 +363,7 @@ class MainActivity : AppCompatActivity() {
             }
             AlertDialog.Builder(this)
                 .setTitle("Disable profile")
-                .setMessage("\"${profile.displayName}\" is the active profile. Disable it?\n\nIf the card is inserted in a phone, restart the phone afterwards.")
+                .setMessage("\"${profile.displayName}\" is the active profile. Disable it?\n\nIf the card is in the phone, the phone will re-read the card automatically (a moment of no service).")
                 .setPositiveButton("Disable") { _, _ ->
                     runAction("Disabling profile") { euicc -> euicc.disableProfile(profile.iccid) }
                 }
@@ -260,7 +372,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             AlertDialog.Builder(this)
                 .setTitle("Enable profile")
-                .setMessage("Make \"${profile.displayName}\" the active eSIM on the card?\n\nIf the card is inserted in a phone, restart the phone afterwards.")
+                .setMessage("Make \"${profile.displayName}\" the active eSIM on the card?\n\nIf the card is in the phone, the phone will re-read the card automatically (a moment of no service).")
                 .setPositiveButton("Enable") { _, _ ->
                     runAction("Enabling profile") { euicc -> euicc.enableProfile(profile.iccid) }
                 }
@@ -319,7 +431,7 @@ class MainActivity : AppCompatActivity() {
     private fun runAction(label: String, block: (EuiccCard) -> Unit) {
         val euicc = card
         if (euicc == null) {
-            toast("Connect a reader first")
+            toast("Connect to the card first")
             return
         }
         runBackground {
@@ -327,6 +439,149 @@ class MainActivity : AppCompatActivity() {
             block(euicc)
             readCard()
         }
+    }
+
+    // ---------------------------------------------------------------- add eSIM profile
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_SCAN && resultCode == RESULT_OK) {
+            val text = data?.getStringExtra(QrScanActivity.EXTRA_RESULT) ?: return
+            appendLog("QR code decoded")
+            startInstall(text)
+        }
+    }
+
+    private fun onAddClicked() {
+        if (busy) return
+        AlertDialog.Builder(this)
+            .setTitle(R.string.add_confirm_title)
+            .setItems(
+                arrayOf(getString(R.string.add_choose_scan), getString(R.string.add_choose_type)),
+            ) { _, which ->
+                when (which) {
+                    0 -> startActivityForResult(Intent(this, QrScanActivity::class.java), REQ_SCAN)
+                    1 -> promptActivationCode()
+                }
+            }
+            .show()
+    }
+
+    private fun promptActivationCode() {
+        val input = EditText(this).apply {
+            hint = getString(R.string.add_code_hint)
+            setSingleLine()
+        }
+        val wrapper = FrameLayout(this).apply {
+            setPadding(dp(24), dp(8), dp(24), 0)
+            addView(input)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.add_confirm_title)
+            .setView(wrapper)
+            .setPositiveButton("Continue") { _, _ -> startInstall(input.text.toString()) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun startInstall(rawCode: String) {
+        val code = try {
+            ActivationCode.parse(rawCode)
+        } catch (e: Exception) {
+            toast(e.message ?: "Could not read the activation code")
+            return
+        }
+        appendLog("Activation code for ${code.smdp}${code.matchingId?.let { " ($it)" } ?: ""}")
+
+        val cc = EditText(this).apply {
+            hint = getString(R.string.add_cc_hint)
+            setSingleLine()
+        }
+        val wrapper = FrameLayout(this).apply {
+            setPadding(dp(24), dp(8), dp(24), 0)
+            addView(cc)
+        }
+        val message = buildString {
+            append("SM-DP+ server: ${code.smdp}\n")
+            code.matchingId?.let { append("Matching ID: $it\n") }
+            if (code.confirmationCodeRequired) append("The code says a confirmation code (password) is required.\n")
+            if (card == null) append("\nNote: the card is not read yet — do that first.\n")
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.add_confirm_title)
+            .setMessage(message)
+            .setView(wrapper)
+            .setPositiveButton(R.string.add_install) { _, _ ->
+                runInstall(code, cc.text.toString().trim().ifEmpty { null })
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun runInstall(code: ActivationCode, confirmationCode: String?) {
+        val euicc = card
+        if (euicc == null) {
+            toast("Read the card first (phone slot or USB reader), then try again")
+            return
+        }
+        runBackground {
+            val session = LpaSession(
+                card = euicc,
+                log = { message -> appendLog(message) },
+                confirmProfile = { meta -> askInstallPreview(meta) },
+            )
+            val outcome = session.install(code, confirmationCode)
+            readCard()
+            ui {
+                val label = outcome.name ?: "The profile"
+                toast("Installed: $label")
+                outcome.iccid?.let { promptEnable(it) }
+            }
+        }
+    }
+
+    /** Runs on the background thread; posts a dialog and waits for the answer. */
+    private fun askInstallPreview(meta: Sgp22.ProfileMeta?): Boolean {
+        val latch = CountDownLatch(1)
+        val confirmed = AtomicBoolean(false)
+        ui {
+            val message = buildString {
+                if (meta != null) {
+                    append("The server is ready to hand over this profile:\n\n")
+                    append("Name: ${meta.displayName}\n")
+                    meta.iccid?.let { append("ICCID ${Hex.grouped(it)}\n") }
+                } else {
+                    append("The server is ready to hand over a profile (no preview data available).\n")
+                }
+                append("\nInstall it onto the card now?")
+            }
+            AlertDialog.Builder(this)
+                .setTitle("Confirm installation")
+                .setMessage(message)
+                .setPositiveButton(R.string.add_install) { _, _ ->
+                    confirmed.set(true)
+                    latch.countDown()
+                }
+                .setNegativeButton("Cancel") { _, _ -> latch.countDown() }
+                .setOnCancelListener { latch.countDown() }
+                .show()
+        }
+        latch.await()
+        return confirmed.get()
+    }
+
+    private fun promptEnable(iccid: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Make it the active eSIM?")
+            .setMessage(
+                "The new profile is on the card but not enabled yet. Enable it now?\n\n" +
+                        "The phone will re-read the card (a moment of no service).",
+            )
+            .setPositiveButton("Enable now") { _, _ ->
+                runAction("Enabling profile") { euicc -> euicc.enableProfile(iccid) }
+            }
+            .setNegativeButton("Later", null)
+            .show()
     }
 
     // ---------------------------------------------------------------- UI plumbing
@@ -341,6 +596,8 @@ class MainActivity : AppCompatActivity() {
             progress.visibility = View.VISIBLE
             btnConnect.isEnabled = false
             btnDemo.isEnabled = false
+            btnSlot.isEnabled = false
+            btnAdd.isEnabled = false
         }
         executor.execute {
             try {
@@ -348,6 +605,9 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 val message = e.message ?: e.toString()
                 appendLog("ERROR: $message")
+                if (message.contains("6F00", ignoreCase = true)) {
+                    appendLog("Hint: the modem is refusing card writes right now. Toggle the built-in eSIM slot off/on under Settings → SIM cards, then retry.")
+                }
                 ui { toast(message) }
             } finally {
                 ui {
@@ -370,12 +630,15 @@ class MainActivity : AppCompatActivity() {
         }
         btnConnect.isEnabled = readers.isNotEmpty() && !busy
         btnDemo.isEnabled = !busy
+        btnSlot.isEnabled = !busy
+        btnAdd.isEnabled = !busy
     }
 
-    private fun showCardInfo(eid: String) {
+    private fun showCardInfo(eid: String?) {
         cardInfo.visibility = View.VISIBLE
         val prefix = if (demoMode) "DEMO — simulated card\n" else ""
-        cardInfo.text = prefix + "Reader: ${transport?.name ?: "?"}\nEID: ${Hex.grouped(eid)}"
+        val eidText = if (eid != null) Hex.grouped(eid) else "not readable on this card"
+        cardInfo.text = prefix + "Transport: ${transport?.name ?: "?"}\nEID: $eidText"
     }
 
     private fun showProfiles(list: List<ProfileInfo>) {

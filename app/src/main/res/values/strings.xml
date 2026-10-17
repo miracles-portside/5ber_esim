@@ -1,12 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">5ber eSIM</string>
-    <string name="tagline">Card manager — USB reader mode</string>
+    <string name="tagline">Card manager — phone slot (no reader needed) or USB reader</string>
     <string name="reader_none">No USB reader detected.\nPlug in a CCID smart-card reader with the 5ber card inserted, then tap Connect.</string>
     <string name="reader_found">Reader: %1$s</string>
     <string name="btn_connect">Connect / Read card</string>
     <string name="btn_demo">Demo mode</string>
+    <string name="btn_slot">Read card in phone slot (Shizuku)</string>
+    <string name="btn_add">Add eSIM profile (QR / activation code)</string>
     <string name="profiles_header">Profiles</string>
     <string name="no_profiles">No profiles found on the card.</string>
     <string name="log_apdus">Log APDUs (debug)</string>
+
+    <string name="scan_hint">Point the camera at the eSIM QR code</string>
+    <string name="scan_close">Close</string>
+
+    <string name="add_choose_scan">Scan QR code</string>
+    <string name="add_choose_type">Enter activation code</string>
+    <string name="add_code_hint">LPA:1$… or 1$server$code</string>
+    <string name="add_confirm_title">Install eSIM profile</string>
+    <string name="add_cc_hint">Confirmation code (only if the purchase included one)</string>
+    <string name="add_install">Install</string>
 </resources>

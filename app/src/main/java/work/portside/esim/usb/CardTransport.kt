@@ -4,6 +4,13 @@ package work.portside.esim.usb
 interface CardTransport {
     val name: String
 
+    /**
+     * True when the transport itself opens the card's application session (e.g. the phone-slot
+     * transport opens the logical channel through the framework). When false, EuiccCard
+     * performs MANAGE CHANNEL + SELECT itself.
+     */
+    val handlesSession: Boolean get() = false
+
     /** Powers the card up; returns the ATR. */
     fun powerOn(): ByteArray
 

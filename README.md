@@ -1,37 +1,58 @@
 # 5ber eSIM
 
-An Android app for talking **directly to a 5ber physical eSIM card** (or any SGP.22 eUICC)
-through a USB smart-card reader — an independent replacement for the dead 5ber app.
+An Android app for talking **directly to a 5ber physical eSIM card** (or any SGP.22 eUICC) —
+an independent replacement for the dead 5ber app. Two ways to reach the card:
 
-## Why a reader?
+- **In the phone's SIM slot, via [Shizuku](https://shizuku.rikka.app/)** — no reader, no root,
+  no PC. This is the everyday path.
+- **Over a USB CCID smart-card reader** — fully self-contained, works even where Shizuku
+  can't run.
 
-The 5ber app could manage the card because the card's ARA-M access table only trusts the
-5ber app (which no longer exists), and Android blocks apps from SIM APDU access anyway.
+## Why Shizuku?
+
+The 5ber card's ARA-M access table only trusts the original 5ber app, which no longer exists,
+and Android blocks ordinary apps from SIM APDU access (OMAPI rejects third-party
+certificates on the orphaned card, and the hidden telephony APIs need shell/root). Shizuku —
+free, no root, startable on-device through wireless debugging on Android 11+ — provides that
+shell context: the app launches a tiny helper process through Shizuku which opens the card's
+management applet on the live modem and pipes APDUs between it and the app.
+
 A USB CCID reader talks ISO 7816 to the chip directly, bypassing ARA-M completely — no
-root required. This is the standard recovery route for orphaned 5ber / esim.me cards.
+Shizuku required. This is the standard recovery route for orphaned cards.
 
 ## Status
 
-Phase 1 — **local profile management over a USB reader** (builds and installs):
+**Phase 1 — local card management** (builds and runs; verified live on a Redmi Note 15 Pro 5G,
+Android 16, with a 5ber/ifree card):
 
+- Phone-slot transport through Shizuku (a helper process on the running modem)
 - USB CCID (T=0) transport for contact smart-card readers
-- eUICC session: MANAGE CHANNEL + ISD-R select, ES10x STORE DATA framing,
-  61XX GET RESPONSE continuation, 120-byte segmentation
+- eUICC session: MANAGE CHANNEL + applet select (5ber vendor applet, ISD-R fallback),
+  ES10x STORE DATA framing, 61XX GET RESPONSE continuation, 120-byte segmentation
 - ES10c operations: read EID, list profiles, enable / disable / delete profile, set nickname
-- Safety rails: can't delete the only/last profile, warnings before disabling or
-  deleting the active profile
+  (enable / disable / delete verified on the card)
+- Safety rails: can't delete the only/last profile, warnings before disabling or deleting
+  the active profile
 - On-screen log (with optional full APDU hex) for on-device debugging
 - **Demo mode** to exercise the whole UI + protocol code without any hardware
 
-Phase 2 — profile download from SM-DP+ (activation code / QR): see `ROADMAP.md`.
+**Phase 2 — profile download (SGP.22)** — implemented, not yet tested end-to-end (needs a
+real activation code):
+
+- QR scanner built in (CameraX + ZXing core, no Play Services) + manual code entry
+- Full download flow: ES10b GetEUICCInfo1 + challenge → ES9+ initiateAuthentication →
+  ES10b AuthenticateServer → ES9+ authenticateClient (profile preview + optional
+  confirmation code) → ES10b PrepareDownload → ES9+ getBoundProfilePackage → segmented
+  BF36 LoadBoundProfilePackage → result notification reported back to the SM-DP+
 
 ## Hardware you need
 
-- A **USB CCID smart-card reader**, T=0. Known-good: Hirsch SCR3310 v2.0, uTrust 2700R/F,
-  HID OMNIKEY 3021/3121, 9eSIM / ESTKme readers. Cheap generic "SIM card reader writers"
-  usually work but are hit-or-miss.
-- A USB-C OTG adapter (for the phone).
-- A nano-SIM → standard SIM adapter if the reader takes full-size SIMs (many include one).
+- **Phone-slot path: nothing extra.** Just the 5ber card, the phone, and Shizuku.
+- **Reader path (optional):** a USB CCID smart-card reader, T=0. Known-good: Hirsch
+  SCR3310 v2.0, uTrust 2700R/F, HID OMNIKEY 3021/3121, 9eSIM / ESTKme readers. Cheap generic
+  "SIM card reader writers" usually work but are hit-or-miss.
+  - A USB-C OTG adapter (for the phone).
+  - A nano-SIM → standard SIM adapter if the reader takes full-size SIMs (many include one).
 
 ## Build
 
@@ -41,32 +62,68 @@ Phase 2 — profile download from SM-DP+ (activation code / QR): see `ROADMAP.md
 
 APK: `app/build/outputs/apk/debug/app-debug.apk`
 
-For the current build, a copy is also at `~/storage/downloads/5ber_esim-debug.apk`.
+For the current build a copy is also at `/sdcard/Download/5ber-esim-0.2.0.apk`.
 
 ## Use
 
+**Read the card in the phone's SIM slot (recommended)**
+
+1. Install [Shizuku](https://shizuku.rikka.app/) and start it (on Android 11+ you can pair it
+   through wireless debugging — no PC needed).
+2. Open the app → *Read card in phone slot (Shizuku)* → grant Shizuku and phone-state
+   permissions.
+3. Manage profiles: enable / disable / rename / delete.
+
+**Over a USB reader**
+
 1. Put the 5ber card in the reader, plug the reader into the phone.
 2. Open the app → *Connect / Read card* → grant USB permission.
-3. Manage profiles. Put the card back in the phone and restart the phone if you
-   switched the active profile.
+3. Manage profiles.
+
+**Add a profile**
+
+1. *Add eSIM profile (QR / activation code)* → scan the provider's QR or paste the code.
+2. Review the profile preview coming from the server; enter the confirmation code if the
+   provider sent one.
+3. The app downloads, installs and reports the result, then offers to enable the new profile.
+
+After switching the active profile, the modem may need a SIM-stack refresh (toggle the card
+in Settings → SIM cards) — the app tells you when.
 
 *Demo mode* runs the entire flow against a fake card, no reader needed.
 
+## Card quirks worth knowing
+
+- The modem occasionally write-blocks this card (`6F00` a few ms into a write). Toggling the
+  built-in eSIM off/on in Settings → SIM cards resets the card's write protection; the app
+  hints this in the log.
+- GetEID needs the `5C` tag selector form (`BF3E 03 5C 01 5A`) on this card; the bare form is
+  refused.
+- Notifications queued on the card (e.g. never-reported install events) are reported to the
+  SM-DP+ the next time the app runs an operation that touches them.
+
 ## Stack
 
-Gradle 8.14.3, AGP 8.13.0, Kotlin 2.2.20, compileSdk/targetSdk 36, minSdk 24,
-package `work.portside.esim`. Termux note: `gradle.properties` points
-`android.aapt2FromMavenOverride` at the prebuilt aapt2 in `~/termux-android-studio`.
+Gradle 8.14.3, AGP 8.13.0, Kotlin 2.2.20, compileSdk/targetSdk 36, minSdk 24, package
+`work.portside.esim`. UI is plain AppCompat views; QR scanning via CameraX 1.4 + ZXing core
+3.5 (no Google Play Services); APDU access through Shizuku 13.1.5.
+Termux note: `gradle.properties` points `android.aapt2FromMavenOverride` at the prebuilt
+aapt2 in `~/termux-android-studio`.
 
 ## Layout
 
 ```
 app/src/main/java/work/portside/esim/
-  util/    Hex, TLV codec, log bus
+  util/    Hex, TLV/BER codecs, base64, log bus
   usb/     CardTransport, USB CCID reader driver, demo (fake) card
   euicc/   EuiccCard — ES10x/ES10c protocol, ProfileInfo
+  lpa/     SGP.22 download: ActivationCode, Es9 (ES9+), Sgp22 (ES10b), LpaSession
+  shell/   SlotHelper — the Shizuku-launched app_process helper
+  slot/    SlotTransport — client side of SlotHelper
+  ui/      QrScanActivity — CameraX/ZXing QR scanner
   MainActivity.kt — UI
 app/src/main/res/  layout, theme, launcher icon, USB attach filter
+profilemgr.py — adb-driven CLI for the same card operations (dev aid)
 ```
 
 Protocol references consulted while writing this (no code copied):
