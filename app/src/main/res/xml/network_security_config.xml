@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Trust anchors for the app's HTTPS calls to SM-DP+ servers.
+
+  SM-DP+ endpoints are commonly secured with GSMA CI (SGP.22) certificates, issued by the
+  GSMA's own root CA — which is absent from Android's public trust store. Android's own
+  LPA bundles these roots too; we do the same and keep the system store for providers that
+  use public CAs.
+
+  (The eUICC additionally authenticates every SM-DP+ response itself: serverSigned1
+  signatures are verified by the card, so this is defence in depth, not the only lock.)
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/gsma_rsp2_root_ci1" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

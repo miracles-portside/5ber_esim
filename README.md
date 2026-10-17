@@ -67,7 +67,7 @@ real activation code):
   both git-ignored: **back them up**, or you won't be able to update-install over an
   existing release build.
 
-Release copies land in `/sdcard/Download/` (e.g. `5ber-esim-0.2.1-release.apk`).
+Release copies land in `/sdcard/Download/` (e.g. `5ber-esim-0.2.2-release.apk`).
 
 ## Use
 
