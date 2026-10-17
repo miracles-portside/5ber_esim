@@ -140,8 +140,10 @@ hints this in the log.
 Gradle 8.14.3, AGP 8.13.0, Kotlin 2.2.20, compileSdk/targetSdk 36, minSdk 24, package
 `work.portside.esim`. UI is plain AppCompat views; QR scanning via CameraX 1.4 + ZXing core
 3.5 (no Google Play Services); APDU access through Shizuku 13.1.5.
-Termux note: `gradle.properties` points `android.aapt2FromMavenOverride` at the prebuilt
-aapt2 in `~/termux-android-studio`.
+Termux note: if the bundled aapt2 can't run on your device, set
+`android.aapt2FromMavenOverride` (e.g. to `~/termux-android-studio/prebuilt/aapt2`) in your
+global `~/.gradle/gradle.properties` — deliberately not in this repo, so the project stays
+clonable anywhere.
 
 ## Layout
 
@@ -160,6 +162,11 @@ app/src/main/res/  layout, theme, launcher icon, USB attach filter,
 profilemgr.py — adb-driven CLI for the same card operations (dev aid)
 ```
 
-Protocol references consulted while writing this (no code copied):
-lpac (`estkme-group/lpac`), OpenEUICC/EasyEUICC (`gitea.angry.im/PeterCxy/OpenEUICC`),
-GSMA SGP.22 v2.2.2.
+## License
+
+This project is licensed under the **GNU AGPL-3.0-only** — see [LICENSE](LICENSE).
+
+The SGP.22 profile-download implementation follows lpac (`estkme-group/lpac`, also
+AGPL-3.0) as its authoritative reference for message construction and the BF36
+segmentation, so this project carries the same license. Other references consulted:
+OpenEUICC / EasyEUICC (`gitea.angry.im/PeterCxy/OpenEUICC`) and GSMA SGP.22 v2.2.2.
