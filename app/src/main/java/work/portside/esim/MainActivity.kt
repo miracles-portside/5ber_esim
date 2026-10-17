@@ -12,6 +12,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
+import android.telephony.SubscriptionInfo
 import android.telephony.SubscriptionManager
 import android.view.View
 import android.view.ViewGroup
@@ -75,6 +76,7 @@ class MainActivity : AppCompatActivity() {
     private var transport: CardTransport? = null
     private var card: EuiccCard? = null
     private var profiles: List<ProfileInfo> = emptyList()
+    private var lastUsbDevice: UsbDevice? = null
 
     @Volatile
     private var busy = false
@@ -120,6 +122,7 @@ class MainActivity : AppCompatActivity() {
 
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     appendLog("Reader detached")
+                    lastUsbDevice = null
                     executor.execute { closeCard() }
                     clearCardUi()
                     updateReaderStatus()
@@ -226,16 +229,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connectToDevice(device: UsbDevice) {
-        runBackground {
-            closeCard()
-            demoMode = false
-            val reader = CcidReader.open(usbManager, device)
-            val euicc = EuiccCard(reader)
-            euicc.connect()
-            transport = reader
-            card = euicc
-            readCard()
-        }
+        lastUsbDevice = device
+        runBackground { doConnectToDevice(device) }
+    }
+
+    /** Must run on the background executor. */
+    private fun doConnectToDevice(device: UsbDevice) {
+        closeCard()
+        demoMode = false
+        val reader = CcidReader.open(usbManager, device)
+        val euicc = EuiccCard(reader)
+        euicc.connect()
+        transport = reader
+        card = euicc
+        readCard()
     }
 
     private fun startDemo() {
@@ -281,38 +288,48 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connectToSlot() {
-        val sm = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as? SubscriptionManager
-        val subs = runCatching { sm?.activeSubscriptionInfoList }.getOrNull().orEmpty()
-        if (subs.isEmpty()) {
+        if (activeSubs().isEmpty()) {
             toast("No active SIM subscriptions found — is the card inserted and enabled in Settings?")
             return
         }
-        runBackground {
-            closeCard()
-            demoMode = false
-            var foundTransport: CardTransport? = null
-            var foundCard: EuiccCard? = null
-            var lastError: String? = null
-            for (info in subs) {
-                try {
-                    val slotTransport = SlotTransport(applicationContext, info.subscriptionId, info.simSlotIndex)
-                    val slotCard = EuiccCard(slotTransport, refreshOnSwitch = true)
-                    slotCard.connect()
-                    foundTransport = slotTransport
-                    foundCard = slotCard
-                    break
-                } catch (e: Exception) {
-                    lastError = e.message
-                    Logs.i("slot: subId ${info.subscriptionId} → ${e.message}")
-                }
-            }
-            val t = foundTransport
-                ?: throw CardException("Card not found in any SIM slot" + (lastError?.let { " ($it)" } ?: ""))
-            val c = foundCard ?: throw CardException("Card not reachable")
-            transport = t
-            card = c
-            readCard()
+        runBackground { doConnectToSlot() }
+    }
+
+    private fun activeSubs(): List<SubscriptionInfo> =
+        runCatching {
+            (getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as? SubscriptionManager)?.activeSubscriptionInfoList
+        }.getOrNull().orEmpty()
+
+    /** Must run on the background executor. Probes every subscription for the card. */
+    private fun doConnectToSlot() {
+        val subs = activeSubs()
+        if (subs.isEmpty()) {
+            throw CardException("No active SIM subscription — the card may still be re-initializing")
         }
+        closeCard()
+        demoMode = false
+        var foundTransport: CardTransport? = null
+        var foundCard: EuiccCard? = null
+        var lastError: String? = null
+        for (info in subs) {
+            try {
+                val slotTransport = SlotTransport(applicationContext, info.subscriptionId, info.simSlotIndex)
+                val slotCard = EuiccCard(slotTransport, refreshOnSwitch = true)
+                slotCard.connect()
+                foundTransport = slotTransport
+                foundCard = slotCard
+                break
+            } catch (e: Exception) {
+                lastError = e.message
+                Logs.i("slot: subId ${info.subscriptionId} → ${e.message}")
+            }
+        }
+        val t = foundTransport
+            ?: throw CardException("Card not found in any SIM slot" + (lastError?.let { " ($it)" } ?: ""))
+        val c = foundCard ?: throw CardException("Card not reachable")
+        transport = t
+        card = c
+        readCard()
     }
 
     /** Must be called on the background executor. Updates the UI when done. */
@@ -437,8 +454,44 @@ class MainActivity : AppCompatActivity() {
         runBackground {
             appendLog(label + "...")
             block(euicc)
-            readCard()
+            readCardResilient()
         }
+    }
+
+    /**
+     * Reads the card, recovering from the SIM refresh that a profile switch triggers:
+     * the modem re-initializes the card, the old logical channel dies (SW 6881/6F00)
+     * and the subscription may briefly disappear. Wait for it and reconnect.
+     */
+    private fun readCardResilient() {
+        try {
+            readCard()
+        } catch (e: Exception) {
+            if (!looksLikeCardRefresh(e)) throw e
+            appendLog("The card re-initialized after the profile switch — reconnecting…")
+            reconnectAfterRefresh()
+        }
+    }
+
+    private fun looksLikeCardRefresh(e: Exception): Boolean {
+        val m = e.message ?: return false
+        return m.contains("6881") || m.contains("6F00")
+    }
+
+    /** Must run on the background executor. Re-opens the previous transport and re-reads. */
+    private fun reconnectAfterRefresh() {
+        var last: Exception? = null
+        repeat(6) {
+            try {
+                val device = lastUsbDevice
+                if (device != null) doConnectToDevice(device) else doConnectToSlot()
+                return
+            } catch (e: Exception) {
+                last = e
+                Thread.sleep(1500)
+            }
+        }
+        throw last ?: CardException("Card not reachable after the refresh — tap the read button again")
     }
 
     // ---------------------------------------------------------------- add eSIM profile
@@ -531,7 +584,7 @@ class MainActivity : AppCompatActivity() {
                 confirmProfile = { meta -> askInstallPreview(meta) },
             )
             val outcome = session.install(code, confirmationCode)
-            readCard()
+            readCardResilient()
             ui {
                 val label = outcome.name ?: "The profile"
                 toast("Installed: $label")

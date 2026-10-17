@@ -66,7 +66,8 @@ object Es9 {
 
     fun handleNotification(smdp: String, pendingNotificationB64: String) {
         val body = JSONObject().put("pendingNotification", pendingNotificationB64)
-        post(smdp, "/gsma/rsp2/es9plus/handleNotification", body)
+        // Servers commonly answer notifications with an empty 2xx body — that means success.
+        post(smdp, "/gsma/rsp2/es9plus/handleNotification", body, allowNonJson = true)
     }
 
     fun cancelSession(smdp: String, transactionId: String, cancelSessionResponseB64: String) {
@@ -78,7 +79,7 @@ object Es9 {
 
     // ------------------------------------------------------------------ plumbing
 
-    private fun post(smdp: String, path: String, body: JSONObject): JSONObject {
+    private fun post(smdp: String, path: String, body: JSONObject, allowNonJson: Boolean = false): JSONObject {
         val url = URL("https://$smdp$path")
         val conn = url.openConnection() as HttpURLConnection
         try {
@@ -99,12 +100,11 @@ object Es9 {
             if (code !in 200..299) {
                 throw SmdpException("SM-DP+ answered HTTP $code${describeError(text)?.let { ": $it" } ?: ""}")
             }
-            val json = try {
+            return try {
                 JSONObject(text)
             } catch (_: Exception) {
-                throw SmdpException("SM-DP+ sent a response that is not JSON")
+                if (allowNonJson) JSONObject() else throw SmdpException("SM-DP+ sent a response that is not JSON")
             }
-            return json
         } catch (e: SmdpException) {
             throw e
         } catch (e: Exception) {
